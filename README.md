@@ -2,6 +2,16 @@
 
 A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. This application leverages Efficient LoRA (Low-Rank Adaptation) capabilities to enable high-quality voice cloning.
 
+<img src="./assets/1_dataset_tab.png">
+
+<img src="./assets/2_train_tab.png">
+
+<img src="./assets/3_inference_tab.png">
+
+<img src="./assets/4_inference_tab_lora.png">
+
+<img src="./assets/5_prep_samples_tab.png">
+
 ---
 
 ## 🔄 Application Workflow
