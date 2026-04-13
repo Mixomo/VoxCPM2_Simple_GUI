@@ -24,6 +24,10 @@ compile_cache_dir = project_root / "models" / ".cache"
 has_cache = compile_cache_dir.exists() and any(compile_cache_dir.iterdir())
 compile_cache_dir.mkdir(parents=True, exist_ok=True)
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(compile_cache_dir)
+# Disable CUDA graph trees to allow safe model unload/reload within the same process.
+# CUDA graphs use thread-local state that corrupts on model recreation, causing AssertionError.
+# All other torch.compile optimizations (kernel fusion, etc.) remain fully active.
+os.environ["TORCHINDUCTOR_CUDAGRAPH_TREES"] = "0"
 
 print("----------------------------------------------------------------", file=sys.stderr)
 if has_cache:
@@ -58,8 +62,24 @@ current_model: Optional[VoxCPM] = None
 asr_model: Optional[WhisperModel] = None
 training_process: Optional[subprocess.Popen] = None
 training_log = ""
+training_finished_played = False # Track if completion chime was played
+CHIME_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "inference_training_done.wav")
+
+def play_done_chime():
+    if os.path.exists(CHIME_PATH):
+        try:
+            import winsound
+            winsound.PlaySound(CHIME_PATH, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        except Exception as e:
+            print(f"Failed to play chime: {e}", file=sys.stderr)
+    else:
+        try:
+            import winsound
+            winsound.MessageBeep()
+        except: pass
 current_lora_config: Optional[LoRAConfig] = None
 current_base_model_path: Optional[str] = None
+current_is_lora: bool = False
 
 # Model Mapping
 VOXCPM_MODELS = {
@@ -112,6 +132,48 @@ def unload_asr_model():
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+
+def unload_model(*args):
+    import torch
+    global current_model, current_lora_config, current_base_model_path, current_is_lora
+    
+    print("Executing aggressive VRAM cleanup...", file=sys.stderr)
+    unload_asr_model()
+    current_is_lora = False
+    
+    if current_model is not None:
+        print("Unloading VoxCPM model instance...", file=sys.stderr)
+        try:
+            # Move to CPU first to signal CUDA to free memory
+            if hasattr(current_model, "tts_model") and current_model.tts_model is not None:
+                current_model.tts_model.to("cpu")
+        except Exception:
+            pass
+            
+        del current_model
+        current_model = None
+        
+    current_lora_config = None
+    current_base_model_path = None
+    
+    # Force deep cleanup regardless of status box
+    import gc
+    gc.collect()
+    
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+            
+    # Reset torch._dynamo to clear compiled graph cache
+    try:
+        if hasattr(torch, "_dynamo"):
+            torch._dynamo.reset()
+    except Exception:
+        pass
+        
+    print("VRAM cleanup complete.", file=sys.stderr)
+    return "VRAM and Models cleared successfully."
 
 
 def get_sample_choices():
@@ -476,7 +538,7 @@ def get_default_lora_config():
 
 
 def load_model(pretrained_path, lora_path=None):
-    global current_model, current_lora_config, current_base_model_path
+    global current_model, current_lora_config, current_base_model_path, current_is_lora
     print(f"Loading model from {pretrained_path}...", file=sys.stderr)
 
     lora_config = None
@@ -509,20 +571,24 @@ def load_model(pretrained_path, lora_path=None):
         lora_config=lora_config,
         lora_weights_path=lora_weights_path,
     )
+    current_is_lora = bool(lora_path)
     return "Model loaded successfully!"
 
 
 def run_inference(text, prompt_wav, prompt_text, lora_selection, cfg_scale, steps, seed, model_choice=None, control=None, progress=gr.Progress(), **kwargs):
-    global current_model, current_lora_config, current_base_model_path
+    global current_model, current_lora_config, current_base_model_path, current_is_lora
+    
+    is_lora_request = bool(lora_selection and lora_selection != "None")
+    current_is_lora = is_lora_request
     
     # Check if we have an existing cache to inform the user
     cache_exists = any(compile_cache_dir.iterdir()) if compile_cache_dir.exists() else False
     
     if not cache_exists:
-        progress(0, desc="[First Run] Initializing hardware acceleration (torch.compile)... Please be patient, this might take a up to 5 minutes!")
-        print("NOTICE: Building compilation cache for the first time. This will take a while but happens only once.", file=sys.stderr)
+        progress(0, desc="[First Run] Initializing hardware acceleration (torch.compile)... Please be patient, this might take up to 5 minutes!")
+        print("NOTICE: Building compilation cache for the first time. This will take up to 5 minutes, but happens only once.", file=sys.stderr)
     else:
-        progress(0, desc="Hardware acceleration detected. Optimizing model for inference...")
+        progress(0, desc="Hardware acceleration detected. Check the console...")
         print("INFO: Using existing persistent compilation cache for optimized inference.", file=sys.stderr)
 
     
@@ -560,11 +626,31 @@ def run_inference(text, prompt_wav, prompt_text, lora_selection, cfg_scale, step
 
     if need_reload:
         try:
+            # Explicitly force a clean state before loading to avoid "loading on top"
+            print("Force clearing VRAM before model reload...", file=sys.stderr)
+            unload_model()
+            
             print(f"Loading base model: {base_model_path}", file=sys.stderr)
-            load_model(base_model_path, lora_selection if lora_selection and lora_selection != "None" else None)
+            # Use a local temporary variable to prevent polluting global if it fails
+            temp_model = VoxCPM.from_pretrained(
+                hf_model_id=base_model_path,
+                load_denoiser=False,
+                optimize=True,
+                lora_config=target_lora_config,
+                lora_weights_path=os.path.join("lora", lora_selection) if (lora_selection and lora_selection != "None") else None
+            )
+            
+            current_model = temp_model
+            current_base_model_path = base_model_path
+            current_lora_config, _ = load_lora_config_from_checkpoint(os.path.join("lora", lora_selection)) if (lora_selection and lora_selection != "None") else (get_default_lora_config(), None)
+            
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             error_msg = f"Failed to load model from {base_model_path}: {str(e)}"
             print(error_msg, file=sys.stderr)
+            # Ensure we are clean if load fails
+            unload_model()
             return None, error_msg
 
     # Handle LoRA hot-swapping
@@ -620,8 +706,8 @@ def run_inference(text, prompt_wav, prompt_text, lora_selection, cfg_scale, step
             prompt_text=final_prompt_text,
             cfg_value=cfg_scale,
             inference_timesteps=steps,
-            denoise=kwargs.get("denoise", False),
         )
+        play_done_chime()
         return (current_model.tts_model.sample_rate, audio_np), "Generation Success"
     except Exception as e:
         import traceback
@@ -666,8 +752,8 @@ def start_training(
     if training_process is not None and training_process.poll() is None:
         return "Training is already running!"
 
-    # Unload ASR to free VRAM for training
-    unload_asr_model()
+    # Unload models to free VRAM for training
+    unload_model()
 
     # Download or resolve model path
     try:
@@ -793,8 +879,26 @@ def stop_training():
     return "No training running."
 
 
+def check_training_status():
+    global training_process, training_log, training_finished_played
+    log = training_log
+    chime = None
+    
+    # If process was running and now it's finished
+    if training_process is not None and training_process.poll() is not None:
+        if not training_finished_played:
+            training_finished_played = True
+            play_done_chime()
+    elif training_process is not None and training_process.poll() is None:
+        # Currently running
+        training_finished_played = False
+        
+    return log, None
+
+
 # --- GUI Layout ---
-with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:    # --- Title Section ---
+with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
+    # --- Title Section ---
     with gr.Row(elem_classes="title-section"):
         with gr.Column(scale=4):
             gr.Markdown("""
@@ -1105,152 +1209,106 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app: 
             )
             stop_btn.click(stop_training, outputs=[logs_out])
             tb_btn.click(launch_tensorboard, inputs=[output_name], outputs=[logs_out])
-
             timer = gr.Timer(1)
-            timer.tick(get_training_log, outputs=logs_out)
+            timer.tick(check_training_status, outputs=[logs_out])
 
         # === Inference Tab ===
         with gr.Tab("🔊 Inference") as tab_infer:
-            with gr.Tabs():
-                # --- Inference (without LoRA) ---
-                with gr.Tab("Standard Inference", id="tab_infer_standard"):
-                    gr.Markdown("### 🎨 Voice Design & Controllable Cloning")
-                    gr.Markdown("> **Note:** Hardware acceleration (torch.compile) is active. If you are running this model for the first time, expect a **significant delay, up to 5 minutes** while the optimization cache is built. Once cached, generation will be lightning fast.")
+            gr.Markdown("### 🎙️ Unified Voice Synthesis")
+            gr.Markdown("> **Optimization Note:** Hardware acceleration (torch.compile) is active. The first generation after loading a new model or LoRA rank may take **up to 5 minutes** to optimize. Subsequent runs will be near-instant.")
+            
+            with gr.Row():
+                # --- Left Column: Reference & Voice Selection ---
+                with gr.Column(scale=1, elem_classes="form-section"):
+                    gr.Markdown("#### 🎙️ Voice & Reference")
                     with gr.Row():
-                        with gr.Column(scale=1, elem_classes="form-section"):
-                            gr.Markdown("#### 🎙️ Reference (Optional)")
-                            with gr.Row():
-                                std_sample_select = gr.Dropdown(
-                                    choices=get_sample_choices(),
-                                    label="Quick Sample Select",
-                                    info="Pick a saved sample from your library.",
-                                    scale=4
-                                )
-                                refresh_std_sample_btn = gr.Button("🔄", scale=1, min_width=50)
-                            std_ref_audio = gr.Audio(label="Reference Audio", type="filepath")
-                            std_ref_text = gr.Textbox(label="Reference Text (Transcript)", placeholder="Transcript (auto if empty)...", lines=3)
-                            
-                        with gr.Column(scale=1, elem_classes="form-section"):
-                            gr.Markdown("#### ✍️ Generation Settings")
-                            std_control = gr.Textbox(label="Control Instruction", placeholder="e.g. A deep scary voice / Gentle and soft girl...", lines=2)
-                            std_text = gr.Textbox(label="Target Text", placeholder="Hello, I am standard VoxCPM...", lines=4)
-                            
-                            with gr.Accordion("⚙️ Parameters", open=False):
-                                std_cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=5.0, value=2.0, step=0.1)
-                                std_steps = gr.Slider(label="Steps", minimum=1, maximum=50, value=10, step=1)
-                                std_seed = gr.Number(label="Seed", value=-1, precision=0)
-                            
-                            std_gen_btn = gr.Button("🔊 Generate Standard Speech", variant="primary", size="lg")
+                        infer_sample_select = gr.Dropdown(
+                            choices=get_sample_choices(),
+                            label="Quick Sample Select",
+                            info="Load a reference from your 'samples' library.",
+                            scale=4
+                        )
+                        refresh_infer_sample_btn = gr.Button("🔄", scale=1, min_width=50)
                     
-                    with gr.Row():
-                        std_audio_out = gr.Audio(label="Output")
-                        std_status_out = gr.Textbox(label="Status")
-
-                    def smart_asr_std(audio, current_text):
-                        if current_text and current_text.strip():
-                            return current_text
-                        return recognize_audio(audio)
-
-                    std_sample_select.change(load_sample, inputs=[std_sample_select], outputs=[std_ref_audio, std_ref_text])
-                    refresh_std_sample_btn.click(lambda: gr.update(choices=get_sample_choices()), outputs=[std_sample_select])
-                    std_ref_audio.change(fn=smart_asr_std, inputs=[std_ref_audio, std_ref_text], outputs=[std_ref_text])
-                    std_gen_btn.click(
-                        run_inference,
-                        inputs=[std_text, std_ref_audio, std_ref_text, gr.State("None"), std_cfg, std_steps, std_seed, train_model_select, std_control],
-                        outputs=[std_audio_out, std_status_out],
+                    infer_ref_audio = gr.Audio(label="Reference Audio", type="filepath")
+                    infer_ref_text = gr.Textbox(
+                        label="Reference Text (Transcript)", 
+                        placeholder="Automatic transcription if left empty...", 
+                        lines=2
                     )
-
-                # --- Inference (LoRA) ---
-                with gr.Tab("LoRA Fine-Tuned", id="tab_infer_lora"):
-                    gr.Markdown("### 🎙️ LoRA Voice Cloning")
-                    gr.Markdown("> **Note:** Hardware acceleration (torch.compile) is active. If you are running this model for the first time, expect a **significant delay, up to 5 minutes** while the optimization cache is built. Once cached, generation will be lightning fast.")
-                    with gr.Row():
-                        with gr.Column(scale=1, elem_classes="form-section"):
-                            gr.Markdown("#### 🎙️ Reference & Context")
-                            with gr.Row():
-                                lora_sample_select = gr.Dropdown(
-                                    choices=get_sample_choices(),
-                                    label="Quick Sample Select",
-                                    scale=4
-                                )
-                                refresh_lora_sample_btn = gr.Button("🔄", scale=1, min_width=50)
-                            prompt_wav = gr.Audio(label="Reference Audio", type="filepath")
-                            prompt_text = gr.Textbox(
-                                label="Reference Text (Transcript)",
-                                placeholder="Transcription of reference audio...",
-                                lines=2,
-                            )
-                            
-                            lora_select = gr.Dropdown(
-                                label="Load LoRA Checkpoint",
-                                choices=["None"] + [ckpt[0] for ckpt in scan_lora_checkpoints(with_info=True)],
-                                value="None",
-                            )
-                            refresh_lora_btn = gr.Button("Refresh Models", variant="secondary")
-                            
-                        with gr.Column(scale=1, elem_classes="form-section"):
-                            gr.Markdown("#### ✍️ Target Speech")
-                            infer_text = gr.Textbox(
-                                label="Target Text",
-                                value="I am speaking with my own fine-tuned voice.",
-                                lines=4,
-                            )
-                            
-                            gr.Markdown("#### 🎚️ Parameters")
-                            cfg_scale = gr.Slider(
-                                label="CFG Scale (Guidance)",
-                                minimum=1.0,
-                                maximum=5.0,
-                                value=2.0,
-                                step=0.1,
-                                elem_classes="input-field",
-                            )
-                            steps = gr.Slider(
-                                label="Inference Steps",
-                                minimum=1,
-                                maximum=50,
-                                value=10,
-                                step=1,
-                                elem_classes="input-field",
-                            )
-                            seed = gr.Number(
-                                label="Seed",
-                                value=-1,
-                                precision=0,
-                                elem_classes="input-field",
-                                info="-1 for random generation.",
-                            )
-
-                            generate_btn = gr.Button("🎵 Generate Speech", variant="primary", elem_classes="button-primary", size="lg")
                     
-                    with gr.Row():
-                        audio_out = gr.Audio(label="Output")
-                        status_out = gr.Textbox(label="Status")
-
-                    def smart_asr_lora(audio, current_text):
-                        if current_text and current_text.strip():
-                            return current_text
-                        return recognize_audio(audio)
-
-                    lora_sample_select.change(load_sample, inputs=[lora_sample_select], outputs=[prompt_wav, prompt_text])
-                    refresh_lora_sample_btn.click(lambda: gr.update(choices=get_sample_choices()), outputs=[lora_sample_select])
-                    refresh_lora_btn.click(refresh_loras, outputs=[lora_select])
-                    prompt_wav.change(fn=smart_asr_lora, inputs=[prompt_wav, prompt_text], outputs=[prompt_text])
-
-                    generate_btn.click(
-                        run_inference,
-                        inputs=[
-                            infer_text,
-                            prompt_wav,
-                            prompt_text,
-                            lora_select,
-                            cfg_scale,
-                            steps,
-                            seed,
-                            train_model_select,
-                        ],
-                        outputs=[audio_out, status_out],
+                    gr.Markdown("---")
+                    infer_lora = gr.Dropdown(
+                        label="Voice Clone (LoRA)",
+                        choices=["None"] + [ckpt[0] for ckpt in scan_lora_checkpoints(with_info=True)],
+                        value="None",
+                        info="Select 'None' for standard VoxCPM voice."
                     )
+                    refresh_infer_lora_btn = gr.Button("🔄 Refresh Available Voices", variant="secondary", size="sm")
+
+                # --- Right Column: Content & Generation Settings ---
+                with gr.Column(scale=1, elem_classes="form-section"):
+                    gr.Markdown("#### ✍️ Target Speech")
+                    infer_text = gr.Textbox(
+                        label="Target Text", 
+                        placeholder="Enter the text you want the AI to speak...", 
+                        lines=4,
+                        value="Hello! I can speak with any voice you provide as a reference."
+                    )
+                    
+                    infer_control = gr.Textbox(
+                        label="Style / Control (Optional)", 
+                        placeholder="e.g. A happy energetic tone / Whispering softly...", 
+                        lines=2
+                    )
+                    
+                    with gr.Accordion("⚙️ Advanced Parameters", open=False):
+                        infer_cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=5.0, value=2.0, step=0.1)
+                        infer_steps = gr.Slider(label="Inference Steps", minimum=1, maximum=50, value=10, step=1)
+                        infer_seed = gr.Number(label="Seed (-1 for Random)", value=-1, precision=0)
+                        infer_base_model = gr.Dropdown(
+                            label="Core Model", 
+                            choices=list(VOXCPM_MODELS.keys()), 
+                            value="VoxCPM-2.0",
+                            info="Select the base foundation model."
+                        )
+
+                    infer_gen_btn = gr.Button("⚡ Generate Speech", variant="primary", size="lg", elem_classes="button-primary")
+
+            with gr.Row():
+                infer_audio_out = gr.Audio(label="Generated Audio")
+                infer_status_out = gr.Textbox(label="System Status", interactive=False)
+            
+            # --- Unified Event Handlers ---
+            def smart_asr_unified(audio, current_text):
+                if current_text and current_text.strip():
+                    return current_text
+                return recognize_audio(audio)
+
+            infer_sample_select.change(load_sample, inputs=[infer_sample_select], outputs=[infer_ref_audio, infer_ref_text])
+            refresh_infer_sample_btn.click(lambda: gr.update(choices=get_sample_choices()), outputs=[infer_sample_select])
+            refresh_infer_lora_btn.click(refresh_loras, outputs=[infer_lora])
+            infer_ref_audio.change(fn=smart_asr_unified, inputs=[infer_ref_audio, infer_ref_text], outputs=[infer_ref_text])
+            
+            # Sync model download
+            infer_base_model.change(fn=download_voxcpm_model, inputs=[infer_base_model], outputs=[])
+            
+            infer_gen_btn.click(
+                run_inference,
+                inputs=[
+                    infer_text,
+                    infer_ref_audio,
+                    infer_ref_text,
+                    infer_lora,
+                    infer_cfg,
+                    infer_steps,
+                    infer_seed,
+                    infer_base_model,
+                    infer_control
+                ],
+                outputs=[infer_audio_out, infer_status_out],
+            )
+            
 
         # === Prep Samples Tab ===
         with gr.Tab("🎙️ Prep Samples", id="tab_prep_samples") as tab_prep_samples:
