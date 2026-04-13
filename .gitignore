@@ -1,0 +1,12 @@
+launch.json
+__pycache__
+voxcpm.egg-info
+.DS_Store
+pretrained_models/
+datasets/
+samples/
+models/
+lora/
+.venv
+.github
+uv.lock
