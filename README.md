@@ -10,7 +10,8 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 2.  **Fine-Tuning:** Configure LoRA or Full Fine-Tuning parameters and train your voice adapter.
 3.  **Inference:** Generate speech using the base model combined with your trained weights.
 
-*   **Persistent Torch & Triton cache**: Integration of `triton-windows` and a custom kernel caching system in `models/.cache`, enabling the full power of `torch.compile` for inference speed-up. **Building the persistent cache for the first time, might take a up to 5 minutes. This is a one time process. Once cached, Subsequent generations will be significantly faster. **
+*   **Persistent Torch & Triton cache**: Integration of `triton-windows` and a custom kernel caching system in `models/.cache`, enabling the full power of `torch.compile` for inference speed-up.
+*   **Building the persistent cache for the first time, might take a up to 5 minutes. This is a one time process. Once cached, Subsequent generations will be significantly faster.**
 
 ---
 
