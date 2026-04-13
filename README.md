@@ -8,9 +8,7 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 
 <img src="./assets/3_inference_tab.png">
 
-<img src="./assets/4_inference_tab_lora.png">
-
-<img src="./assets/5_prep_samples_tab.png">
+<img src="./assets/4_prep_samples_tab.png">
 
 ---
 

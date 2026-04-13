@@ -898,6 +898,11 @@ def check_training_status():
 
 # --- GUI Layout ---
 with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
+    # --- Initial State for Samples ---
+    sample_choices = get_sample_choices()
+    default_sample_name = sample_choices[0] if sample_choices else None
+    default_audio, default_text = load_sample(default_sample_name)
+    
     # --- Title Section ---
     with gr.Row(elem_classes="title-section"):
         with gr.Column(scale=4):
@@ -1223,18 +1228,20 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                     gr.Markdown("#### 🎙️ Voice & Reference")
                     with gr.Row():
                         infer_sample_select = gr.Dropdown(
-                            choices=get_sample_choices(),
+                            choices=sample_choices,
+                            value=default_sample_name,
                             label="Quick Sample Select",
                             info="Load a reference from your 'samples' library.",
                             scale=4
                         )
                         refresh_infer_sample_btn = gr.Button("🔄", scale=1, min_width=50)
                     
-                    infer_ref_audio = gr.Audio(label="Reference Audio", type="filepath")
+                    infer_ref_audio = gr.Audio(label="Reference Audio", type="filepath", value=default_audio)
                     infer_ref_text = gr.Textbox(
                         label="Reference Text (Transcript)", 
                         placeholder="Automatic transcription if left empty...", 
-                        lines=2
+                        lines=2,
+                        value=default_text
                     )
                     
                     gr.Markdown("---")
@@ -1326,8 +1333,8 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                 with gr.Column(scale=1, elem_classes="form-section"):
                     gr.Markdown("#### 📂 Your Samples")
                     sample_dropdown = gr.Dropdown(
-                        choices=get_sample_choices(),
-                        value=get_sample_choices()[0] if get_sample_choices() else None,
+                        choices=sample_choices,
+                        value=default_sample_name,
                         label="Select Sample",
                         interactive=True
                     )
@@ -1344,16 +1351,17 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                     )
                     
                     
-                    prep_audio_player = gr.Audio(label="Audio Editor (Use Trim icon to edit)", type="filepath", interactive=True)
+                    prep_audio_player = gr.Audio(label="Audio Editor (Use Trim icon to edit)", type="filepath", interactive=True, value=default_audio)
                     prep_transcription = gr.Textbox(
                         label="Reference Text / Transcription",
                         placeholder="Transcription will appear here, or enter/edit text manually...",
                         lines=4,
-                        interactive=True
+                        interactive=True,
+                        value=default_text
                     )
                     with gr.Row():
                         transcribe_prep_btn = gr.Button("✨ Transcribe", variant="secondary")
-                        save_sample_name = gr.Textbox(label="Sample ID", placeholder="e.g. news_anchor_1", scale=2)
+                        save_sample_name = gr.Textbox(label="Sample ID", placeholder="e.g. news_anchor_1", scale=2, value=default_sample_name)
                         save_sample_btn = gr.Button("💾 Save Sample", variant="primary", scale=1)
                     
                     prep_op_status = gr.Textbox(label="Operation Status", interactive=False)
