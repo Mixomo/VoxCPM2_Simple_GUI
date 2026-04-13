@@ -4,7 +4,7 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 
 <img src="./assets/1_dataset_tab.png">
 
-<img src="./assets/2_train_tab.png">
+<img src="./assets/2_training_tab.png">
 
 <img src="./assets/3_inference_tab.png">
 
