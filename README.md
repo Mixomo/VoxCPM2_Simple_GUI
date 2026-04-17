@@ -4,7 +4,7 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 
 <img src="./assets/1_dataset_tab.png">
 
-<img src="./assets/2_train_tab.png">
+<img src="./assets/2_training_tab.png">
 
 <img src="./assets/3_inference_tab.png">
 
@@ -63,6 +63,20 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 ## 🛠️ Installation & Execution (Linux)
 
 This project utilizes `uv` for lightning-fast dependency management.
+
+### Clone the repository:
+
+```bash
+git clone https://github.com/OpenBMB/VoxCPM.git
+
+cd VoxCPM
+```
+
+### Give the scripts execute permissions:
+
+```bash
+chmod +x install.sh start.sh
+```
 
 ### Setup Steps
 1.  **Run Installer:** Execute the installation script in your terminal:
