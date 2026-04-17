@@ -49,9 +49,10 @@ dependencies = [
     "matplotlib",
     "argbind",
     "safetensors",
-    "triton-windows",
+    "triton",
     "faster-whisper",
-    "tensorboardx"
+    "tensorboardx",
+    "ninja"
 ]
 
 [project.optional-dependencies]

@@ -60,13 +60,18 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 
 ---
 
-## 🛠️ Installation & Execution (Windows)
+## 🛠️ Installation & Execution (Linux)
 
 This project utilizes `uv` for lightning-fast dependency management.
 
 ### Setup Steps
-1.  **Run Installer:** Double-click `install.bat`.
-    * This installs `uv` via Winget (if not present).
-    * Synchronizes the environment and installs all required libraries automatically.
-2.  **Launch App:** Double-click `start.bat`.
+1.  **Run Installer:** Execute the installation script in your terminal:
+    ```bash
+    ./install.sh
+    ```
+    * This installs `uv` (if not present) and synchronizes the environment automatically.
+2.  **Launch App:** Start the WebUI:
+    ```bash
+    ./start.sh
+    ```
 3.  **Access:** Navigate to `http://127.0.0.1:7860` in your web browser.

@@ -1,5 +1,8 @@
 import os
 import sys
+# Set environment variables BEFORE importing torch to ensure Inductor respects them
+os.environ["TORCHINDUCTOR_CUDAGRAPH_TREES"] = "0"
+
 import json
 import yaml
 import datetime
@@ -7,12 +10,16 @@ import subprocess
 import threading
 import gradio as gr
 import torch
+import torch._inductor.config as inductor_config
+inductor_config.triton.cudagraphs = False
+
 from pathlib import Path
 from typing import Optional
 
 # Add src to sys.path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root / "src"))
+
 
 # Default pretrained model path: prefer VoxCPM2 if it exists, fallback to VoxCPM1.5
 _v2_path = project_root / "models" / "openbmb__VoxCPM2"
@@ -24,10 +31,9 @@ compile_cache_dir = project_root / "models" / ".cache"
 has_cache = compile_cache_dir.exists() and any(compile_cache_dir.iterdir())
 compile_cache_dir.mkdir(parents=True, exist_ok=True)
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(compile_cache_dir)
-# Disable CUDA graph trees to allow safe model unload/reload within the same process.
-# CUDA graphs use thread-local state that corrupts on model recreation, causing AssertionError.
-# All other torch.compile optimizations (kernel fusion, etc.) remain fully active.
-os.environ["TORCHINDUCTOR_CUDAGRAPH_TREES"] = "0"
+
+
+
 
 print("----------------------------------------------------------------", file=sys.stderr)
 if has_cache:
@@ -63,20 +69,8 @@ asr_model: Optional[WhisperModel] = None
 training_process: Optional[subprocess.Popen] = None
 training_log = ""
 training_finished_played = False # Track if completion chime was played
-CHIME_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "inference_training_done.wav")
+# Chime removed as winsound is Windows-only
 
-def play_done_chime():
-    if os.path.exists(CHIME_PATH):
-        try:
-            import winsound
-            winsound.PlaySound(CHIME_PATH, winsound.SND_FILENAME | winsound.SND_ASYNC)
-        except Exception as e:
-            print(f"Failed to play chime: {e}", file=sys.stderr)
-    else:
-        try:
-            import winsound
-            winsound.MessageBeep()
-        except: pass
 current_lora_config: Optional[LoRAConfig] = None
 current_base_model_path: Optional[str] = None
 current_is_lora: bool = False
@@ -118,7 +112,16 @@ def get_or_load_asr_model():
         device = "cuda" if torch.cuda.is_available() else "cpu"
         # Using float16 for CUDA to save VRAM and speed up, int8 for CPU
         compute_type = "float16" if device == "cuda" else "int8"
-        asr_model = WhisperModel("large-v3", device=device, compute_type=compute_type)
+        
+        # Local model path
+        whisper_model_name = "Systran/faster-whisper-large-v3"
+        dest_path = project_root / "models" / whisper_model_name.replace("/", "--")
+        
+        if not dest_path.exists():
+            print(f"Downloading ASR model to {dest_path}...", file=sys.stderr)
+            snapshot_download(repo_id=whisper_model_name, local_dir=str(dest_path), local_dir_use_symlinks=False)
+            
+        asr_model = WhisperModel(str(dest_path), device=device, compute_type=compute_type)
     return asr_model
 
 
@@ -707,8 +710,8 @@ def run_inference(text, prompt_wav, prompt_text, lora_selection, cfg_scale, step
             cfg_value=cfg_scale,
             inference_timesteps=steps,
         )
-        play_done_chime()
-        return (current_model.tts_model.sample_rate, audio_np), "Generation Success"
+        audio_int16 = (audio_np * 32767).astype(np.int16)
+        return (current_model.tts_model.sample_rate, audio_int16), "Generation Success"
     except Exception as e:
         import traceback
 
@@ -888,7 +891,8 @@ def check_training_status():
     if training_process is not None and training_process.poll() is not None:
         if not training_finished_played:
             training_finished_played = True
-            play_done_chime()
+
+
     elif training_process is not None and training_process.poll() is None:
         # Currently running
         training_finished_played = False
