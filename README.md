@@ -58,7 +58,21 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 * **Clean Transcripts:** Text must match audio **exactly**. Inaccurate transcripts degrade both cloning quality and text adherence.
 * **Remove Noise:** The model is highly sensitive to background noise. Use clean, isolated voice recordings.
 
+## 💻 Hardware Requirements
+
+- **Inference (Running the model):**
+  - Minimum: **8 GB VRAM**
+  - Recommended: **12 GB VRAM**
+- **Training (Fine-tuning/LoRA):**
+  - Minimum: **+24 GB VRAM**
+
 ---
+
+## Clone the repository:
+
+```bash
+git clone https://github.com/OpenBMB/VoxCPM.git
+```
 
 ## 🛠️ Installation & Execution (Windows)
 
