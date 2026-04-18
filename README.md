@@ -33,10 +33,10 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 
 ### 🔌 Hardware Setup (VRAM Requirements)
 
-| Model | LoRA Training | Full Fine-Tuning |
-| :--- | :--- | :--- |
-| **VoxCPM 1.5 (750M)** | ~12 GB VRAM | ~24 GB VRAM |
-| **VoxCPM 2.0 (2B)** | ~20 GB VRAM | ~40 GB VRAM |
+| Model | LoRA Training |
+| :--- | :--- |
+| **VoxCPM 1.5 (750M)** | ~12 GB VRAM |
+| **VoxCPM 2.0 (2B)** | ~20 GB VRAM |
 
 ---
 
@@ -57,6 +57,15 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 * **Normalize Volume:** Ensure consistent levels across all training samples.
 * **Clean Transcripts:** Text must match audio **exactly**. Inaccurate transcripts degrade both cloning quality and text adherence.
 * **Remove Noise:** The model is highly sensitive to background noise. Use clean, isolated voice recordings.
+
+## 💻 Hardware Requirements
+
+- **Inference (Running the model):**
+  - Minimum: **8 GB VRAM**
+  - Recommended: **12 GB VRAM**
+- **Training (LoRA):**
+  - Minimum: **+12 GB VRAM** (VoxCPM 1.5) 
+  - Recommended: **+20 GB VRAM** (VoxCPM 2.0)
 
 ---
 
