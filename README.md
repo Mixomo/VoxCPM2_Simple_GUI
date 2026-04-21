@@ -33,10 +33,10 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 
 ### 🔌 Hardware Setup (VRAM Requirements)
 
-| Model | LoRA Training | Full Fine-Tuning |
-| :--- | :--- | :--- |
-| **VoxCPM 1.5 (750M)** | ~12 GB VRAM | ~24 GB VRAM |
-| **VoxCPM 2.0 (2B)** | ~20 GB VRAM | ~40 GB VRAM |
+| Model | LoRA Training |
+| :--- | :--- |
+| **VoxCPM 1.5 (750M)** | ~12 GB VRAM |
+| **VoxCPM 2.0 (2B)** | ~20 GB VRAM |
 
 ---
 
@@ -63,15 +63,18 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 - **Inference (Running the model):**
   - Minimum: **8 GB VRAM**
   - Recommended: **12 GB VRAM**
-- **Training (Fine-tuning/LoRA):**
-  - Minimum: **+24 GB VRAM**
+- **Training (LoRA):**
+  - Minimum: **+12 GB VRAM** (VoxCPM 1.5) 
+  - Recommended: **+20 GB VRAM** (VoxCPM 2.0)
 
 ---
 
 ## Clone the repository:
 
 ```bash
-git clone https://github.com/OpenBMB/VoxCPM.git
+git clone https://github.com/Mixomo/VoxCPM2_Simple_GUI.git
+
+cd VoxCPM2_Simple_GUI
 ```
 
 ## 🛠️ Installation & Execution (Windows)
