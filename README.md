@@ -76,9 +76,9 @@ This project utilizes `uv` for lightning-fast dependency management.
 ### Clone the repository:
 
 ```bash
-git clone https://github.com/OpenBMB/VoxCPM.git
+git clone -b main_linux https://github.com/Mixomo/VoxCPM2_Simple_GUI.git
 
-cd VoxCPM
+cd VoxCPM2_Simple_GUI
 ```
 
 ### Give the scripts execute permissions:
