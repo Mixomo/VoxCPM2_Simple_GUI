@@ -72,7 +72,7 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 ## Clone the repository:
 
 ```bash
-git clone https://github.com/OpenBMB/VoxCPM.git
+git clone https://github.com/Mixomo/VoxCPM2_Simple_GUI.git
 ```
 
 ## 🛠️ Installation & Execution (Windows)
