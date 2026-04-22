@@ -589,7 +589,7 @@ def load_model(pretrained_path, lora_path=None):
     return "Model loaded successfully!"
 
 
-def run_inference(text, prompt_wav, prompt_text, lora_selection, cfg_scale, steps, seed, model_choice=None, control=None, progress=gr.Progress(), **kwargs):
+def run_inference(text, prompt_wav, prompt_text, lora_selection, cfg_scale, steps, seed, model_choice=None, control=None, progress=gr.Progress(), split_by_paragraph=False, **kwargs):
     global current_model, current_lora_config, current_base_model_path, current_is_lora
     
     is_lora_request = bool(lora_selection and lora_selection != "None")
@@ -709,24 +709,56 @@ def run_inference(text, prompt_wav, prompt_text, lora_selection, cfg_scale, step
         else:
             final_prompt_text = prompt_text.strip()
     
+    # Prepare paragraphs based on split logic
+    if split_by_paragraph:
+        paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+    else:
+        paragraphs = [text.strip()]
+    
+    if not paragraphs or (len(paragraphs) == 1 and not paragraphs[0]):
+        return None, "Error: No text provided for generation."
+
+    num_clips = len(paragraphs)
+    audio_segments = []
+    sample_rate = 16000 # default fallback
+    
     # Standard generation with optional control instruction
     final_control = (control or kwargs.get("control") or "").strip()
-    final_text = f"({final_control}){text}" if final_control else text
 
     try:
-        audio_np = current_model.generate(
-            text=final_text,
-            prompt_wav_path=final_prompt_wav,
-            prompt_text=final_prompt_text,
-            cfg_value=cfg_scale,
-            inference_timesteps=steps,
-        )
+        for i, para in enumerate(paragraphs):
+            current_text = f"({final_control}){para}" if final_control else para
+            progress((i / num_clips), desc=f"Generating clip {i+1}/{num_clips} ({len(para)} chars)...")
+            
+            audio_np = current_model.generate(
+                text=current_text,
+                prompt_wav_path=final_prompt_wav,
+                prompt_text=final_prompt_text,
+                cfg_value=cfg_scale,
+                inference_timesteps=steps,
+            )
+            
+            audio_segments.append(audio_np)
+            sample_rate = current_model.tts_model.sample_rate
+            
+            # Add 0.5 second of silence after each paragraph (except the last one)
+            if split_by_paragraph and i < num_clips - 1:
+                silence_len = int(sample_rate * 0.5)
+                silence = np.zeros(silence_len, dtype=np.float32)
+                audio_segments.append(silence)
+
         play_done_chime()
-        audio_int16 = (audio_np * 32767).astype(np.int16)
-        return (current_model.tts_model.sample_rate, audio_int16), "Generation Success"
+        
+        # Concatenate all generated segments
+        if len(audio_segments) > 1:
+            full_audio = np.concatenate(audio_segments)
+        else:
+            full_audio = audio_segments[0]
+
+        audio_int16 = (full_audio * 32767).astype(np.int16)
+        return (sample_rate, audio_int16), f"Generation Success! {num_clips} clips processed."
     except Exception as e:
         import traceback
-
         traceback.print_exc()
         return None, f"Error: {str(e)}"
 
@@ -1284,6 +1316,20 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                         placeholder="e.g. A happy energetic tone / Whispering softly...", 
                         lines=2
                     )
+
+                    with gr.Row():
+                        infer_split_by_paragraph = gr.Checkbox(
+                            label="Split by Paragraph (for long texts)", 
+                            value=False, 
+                            info="ℹ️ *To apply splits, you must press **Enter** after each sentence or point where you want a cut; each line break will generate an independent audio clip that will be automatically merged.*",
+                            scale=3
+                        )
+                        infer_clips_count = gr.Markdown(
+                            value="*1 clip detected*",
+                            visible=False,
+                            elem_classes="clips-count-mini"
+                        )
+                    
                     
                     with gr.Accordion("⚙️ Advanced Parameters", open=False):
                         infer_cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=5.0, value=2.0, step=0.1)
@@ -1312,6 +1358,19 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
             refresh_infer_sample_btn.click(lambda: gr.update(choices=get_sample_choices()), outputs=[infer_sample_select])
             refresh_infer_lora_btn.click(refresh_loras, outputs=[infer_lora])
             infer_ref_audio.change(fn=smart_asr_unified, inputs=[infer_ref_audio, infer_ref_text], outputs=[infer_ref_text])
+
+            def update_clips_count(text, enabled):
+                if not enabled:
+                    return gr.update(visible=False)
+                if not text:
+                    return gr.update(visible=True, value="*1 clip detected*")
+                paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+                count = len(paragraphs)
+                label = f"**{count} clips detected**" if count > 1 else "*1 clip detected*"
+                return gr.update(visible=True, value=label)
+
+            infer_text.change(update_clips_count, inputs=[infer_text, infer_split_by_paragraph], outputs=[infer_clips_count])
+            infer_split_by_paragraph.change(update_clips_count, inputs=[infer_text, infer_split_by_paragraph], outputs=[infer_clips_count])
             
             # Sync model download
             infer_base_model.change(fn=download_voxcpm_model, inputs=[infer_base_model], outputs=[])
@@ -1327,7 +1386,8 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                     infer_steps,
                     infer_seed,
                     infer_base_model,
-                    infer_control
+                    infer_control,
+                    infer_split_by_paragraph
                 ],
                 outputs=[infer_audio_out, infer_status_out],
             )
