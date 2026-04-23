@@ -98,3 +98,10 @@ chmod +x install.sh start.sh
     ./start.sh
     ```
 3.  **Access:** Navigate to `http://127.0.0.1:7860` in your web browser.
+
+
+---
+
+Inspired by [FranckyB](https://github.com/FranckyB) [Voice Clone Studio](https://github.com/FranckyB/Voice-Clone-Studio)
+
+Based on [VoxCPM2](https://github.com/OpenBMB/VoxCPM) by [OpenBMB](https://github.com/OpenBMB)
