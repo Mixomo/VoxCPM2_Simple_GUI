@@ -209,11 +209,11 @@ def get_sample_choices():
             name = os.path.splitext(f)[0]
             if name not in choices:
                 choices.append(name)
-    return sorted(choices)
+    return ["None"] + sorted(choices)
 
 
 def load_sample(sample_name):
-    if not sample_name:
+    if not sample_name or sample_name == "None":
         return None, ""
     samples_dir = project_root / "samples"
     
@@ -254,6 +254,11 @@ def load_sample(sample_name):
             
     return str(audio_path.absolute()), text
 
+def handle_sample_selection_ui(sample_name):
+    """Wrapper for sample selection that also controls Style/Control visibility"""
+    audio, text = load_sample(sample_name)
+    control_visible = (sample_name == "None" or not sample_name)
+    return audio, text, gr.update(visible=control_visible)
 
 def save_prep_sample(audio_path, sample_name, transcription):
     if not audio_path or not sample_name:
@@ -804,7 +809,7 @@ def generate_dialogue(lora_selection, cfg_scale, steps, seed, model_choice, spli
         
         # Load sample
         ref_audio, ref_text = load_sample(sample_name)
-        if not ref_audio:
+        if not ref_audio and sample_name != "None":
             print(f"Sample {sample_name} not found, skipping segment {i+1}")
             continue
             
@@ -865,7 +870,7 @@ def add_dialogue_row_at(index, count, *args):
     
     updates = [count]
     updates.extend([gr.update(value=samples[i], visible=(i < count)) for i in range(num)])
-    updates.extend([gr.update(value=controls[i], visible=(i < count)) for i in range(num)])
+    updates.extend([gr.update(value=controls[i], visible=(i < count and (samples[i] == "None" or not samples[i]))) for i in range(num)])
     updates.extend([gr.update(value=texts[i], visible=(i < count)) for i in range(num)])
     updates.extend([gr.update(visible=(i < count)) for i in range(num)])
     return updates
@@ -887,7 +892,7 @@ def rem_dialogue_row_at(index, count, *args):
         
     updates = [count]
     updates.extend([gr.update(value=samples[i], visible=(i < count)) for i in range(num)])
-    updates.extend([gr.update(value=controls[i], visible=(i < count)) for i in range(num)])
+    updates.extend([gr.update(value=controls[i], visible=(i < count and (samples[i] == "None" or not samples[i]))) for i in range(num)])
     updates.extend([gr.update(value=texts[i], visible=(i < count)) for i in range(num)])
     updates.extend([gr.update(visible=(i < count)) for i in range(num)])
     return updates
@@ -909,7 +914,7 @@ def clone_dialogue_row_at(index, count, *args):
         
     updates = [count]
     updates.extend([gr.update(value=samples[i], visible=(i < count)) for i in range(num)])
-    updates.extend([gr.update(value=controls[i], visible=(i < count)) for i in range(num)])
+    updates.extend([gr.update(value=controls[i], visible=(i < count and (samples[i] == "None" or not samples[i]))) for i in range(num)])
     updates.extend([gr.update(value=texts[i], visible=(i < count)) for i in range(num)])
     updates.extend([gr.update(visible=(i < count)) for i in range(num)])
     return updates
@@ -1495,9 +1500,10 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                             )
                             
                             infer_control = gr.Textbox(
-                                label="Style / Control (Optional)", 
+                                label="Style / Control (Optional) Only works without a reference sample / text loaded.", 
                                 placeholder="e.g. A happy energetic tone / Whispering softly...", 
-                                lines=2
+                                lines=2,
+                                visible=(default_sample_name == "None")
                             )
                             
                             infer_clips_count = gr.Markdown(
@@ -1526,8 +1532,13 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                     for i in range(MAX_DIALOGUE_SEGMENTS):
                         with gr.Row(visible=(i < 2)) as row:
                             with gr.Column(scale=3):
-                                s = gr.Dropdown(choices=sample_choices, label=f"Speaker {i+1}", value=default_sample_name if i < 2 else None)
-                                c = gr.Textbox(placeholder=f"Style {i+1}...", label=f"Control {i+1}", lines=1)
+                                s = gr.Dropdown(choices=sample_choices, label=f"Speaker {i+1}", value=default_sample_name if i < 2 else "None")
+                                c = gr.Textbox(
+                                    placeholder=f"Style {i+1}...", 
+                                    label=f"Control {i+1} (Only works without sample)", 
+                                    lines=1,
+                                    visible=(default_sample_name == "None" if i < 2 else True)
+                                )
                             t = gr.Textbox(placeholder=f"Enter text for speaker {i+1}...", label=f"Text {i+1}", scale=7, lines=5)
                             with gr.Row(scale=1):
                                 add_btn = gr.Button("➕", variant="secondary", size="sm", elem_classes=["green-btn"])
@@ -1560,6 +1571,19 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                             outputs=[dialogue_row_count] + dialogue_samples + dialogue_controls + dialogue_texts + dialogue_rows
                         )
                         
+                        # Add visibility handler for dialogue builder rows
+                        def make_row_handler(idx):
+                            def handler(sample_name):
+                                visible = (sample_name == "None")
+                                return gr.update(visible=visible)
+                            return handler
+                            
+                        dialogue_samples[i].change(
+                            fn=make_row_handler(i),
+                            inputs=[dialogue_samples[i]],
+                            outputs=[dialogue_controls[i]]
+                        )
+                        
                     dialogue_gen_btn = gr.Button("⚡ Generate Dialogue", variant="primary", size="lg", elem_classes="button-primary")
 
             with gr.Row():
@@ -1572,7 +1596,11 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                     return current_text
                 return recognize_audio(audio)
 
-            infer_sample_select.change(load_sample, inputs=[infer_sample_select], outputs=[infer_ref_audio, infer_ref_text])
+            infer_sample_select.change(
+                fn=handle_sample_selection_ui, 
+                inputs=[infer_sample_select], 
+                outputs=[infer_ref_audio, infer_ref_text, infer_control]
+            )
             refresh_infer_sample_btn.click(lambda: gr.update(choices=get_sample_choices()), outputs=[infer_sample_select])
             refresh_infer_lora_btn.click(refresh_loras, outputs=[infer_lora])
             infer_ref_audio.change(fn=smart_asr_unified, inputs=[infer_ref_audio, infer_ref_text], outputs=[infer_ref_text])
