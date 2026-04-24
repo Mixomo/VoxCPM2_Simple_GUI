@@ -747,6 +747,19 @@ def run_inference(text, prompt_wav, prompt_text, lora_selection, cfg_scale, step
     audio_segments = []
     sample_rate = 16000 # default fallback
     
+    # Prepare paragraphs based on split logic
+    if split_by_paragraph:
+        paragraphs = [p.strip() for p in text.split('\n') if p.strip()]
+    else:
+        paragraphs = [text.strip()]
+    
+    if not paragraphs or (len(paragraphs) == 1 and not paragraphs[0]):
+        return None, "Error: No text provided for generation."
+
+    num_clips = len(paragraphs)
+    audio_segments = []
+    sample_rate = 16000 # default fallback
+    
     # Standard generation with optional control instruction
     final_control = (control or kwargs.get("control") or "").strip()
 
@@ -779,7 +792,6 @@ def run_inference(text, prompt_wav, prompt_text, lora_selection, cfg_scale, step
         return (sample_rate, audio_int16), f"Generation Success ({num_clips} clips)"
     except Exception as e:
         import traceback
-
         traceback.print_exc()
         return None, f"Error: {str(e)}"
 
