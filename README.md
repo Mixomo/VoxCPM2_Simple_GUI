@@ -10,7 +10,7 @@ A comprehensive WebUI for fine-tuning and interacting with **VoxCPM** models. Th
 
 <img src="./assets/4_prep_samples_tab.png">
 
-### 2026-04-24 - Add of Dialogue Builder - Multi Speaker Support Inference
+### 2026-04-24 - Add Dialogue Builder - Multi Speaker Support Inference
 We've introduced a **Dialogue Builder** sub-tab within the Voice Clone interface, designed for creating multi-speaker interactions easily:
 
 *   **Dynamic Row Management**: Effortlessly build dialogues by adding (`➕`), cloning (`📋`), or removing (`🗑️`) speaker segments. 
