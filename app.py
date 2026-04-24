@@ -28,14 +28,20 @@ default_pretrained_path = str(_v2_path if _v2_path.exists() else _v15_path)
  
 # Setup persistent cache for torch.compile
 compile_cache_dir = project_root / "models" / ".cache"
-has_cache = compile_cache_dir.exists() and any(compile_cache_dir.iterdir())
+HAS_COMPILE_CACHE = compile_cache_dir.exists() and any(compile_cache_dir.iterdir())
+_cache_kernel_count = 0
+if HAS_COMPILE_CACHE:
+    # Recursively count files in the cache directory to show progress/status
+    for root, dirs, files in os.walk(compile_cache_dir):
+        _cache_kernel_count += len(files)
+
 compile_cache_dir.mkdir(parents=True, exist_ok=True)
 os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(compile_cache_dir)
 
 
 print("----------------------------------------------------------------", file=sys.stderr)
-if has_cache:
-    print(f"INFO: Persistent compilation cache detected at {compile_cache_dir}", file=sys.stderr)
+if HAS_COMPILE_CACHE:
+    print(f"INFO: Persistent compilation cache detected at {compile_cache_dir} ({_cache_kernel_count} kernels)", file=sys.stderr)
     print("INFO: Models will use this cache for hardware-accelerated inference.", file=sys.stderr)
 else:
     print(f"NOTICE: Compilation cache will be built at {compile_cache_dir}", file=sys.stderr)
@@ -762,6 +768,153 @@ def run_inference(text, prompt_wav, prompt_text, lora_selection, cfg_scale, step
         traceback.print_exc()
         return None, f"Error: {str(e)}"
 
+def process_audio_array(audio_data):
+    """Converts audio to mono and normalizes volume to [-1, 1]"""
+    if len(audio_data.shape) > 1 and audio_data.shape[1] > 1:
+        audio_data = np.mean(audio_data, axis=1)
+    
+    max_val = np.max(np.abs(audio_data))
+    if max_val > 0:
+        audio_data = audio_data / max_val
+        
+    return audio_data
+
+def generate_dialogue(lora_selection, cfg_scale, steps, seed, model_choice, split_para, row_count, silence_duration, *args, progress=gr.Progress()):
+    num_max = 20
+    samples = args[:num_max]
+    controls = args[num_max:2*num_max]
+    texts = args[2*num_max:3*num_max]
+    
+    segments = []
+    for i in range(int(row_count)):
+        s = samples[i]
+        c = controls[i]
+        t = texts[i]
+        if s and t:
+            segments.append((s, c, t))
+            
+    if not segments:
+        return None, "Please add at least one speaker and text."
+        
+    all_audio_segments = []
+    final_sr = 16000 # default
+    
+    for i, (sample_name, control, text) in enumerate(segments):
+        progress((i / len(segments)), desc=f"Processing segment {i+1}/{len(segments)} ({sample_name})...")
+        
+        # Load sample
+        ref_audio, ref_text = load_sample(sample_name)
+        if not ref_audio:
+            print(f"Sample {sample_name} not found, skipping segment {i+1}")
+            continue
+            
+        result, status = run_inference(
+            text=text, 
+            prompt_wav=ref_audio, 
+            prompt_text=ref_text, 
+            lora_selection=lora_selection, 
+            cfg_scale=cfg_scale, 
+            steps=steps, 
+            seed=seed, 
+            model_choice=model_choice, 
+            control=control, 
+            progress=progress, 
+            split_by_paragraph=split_para
+        )
+        
+        if result is not None:
+            sr, audio_int16 = result
+            final_sr = sr
+            audio_data = audio_int16.astype(np.float32) / 32767.0
+            audio_data = process_audio_array(audio_data)
+            all_audio_segments.append(audio_data)
+            
+            if silence_duration > 0:
+                silence = np.zeros(int(sr * silence_duration), dtype=np.float32)
+                all_audio_segments.append(silence)
+        else:
+            return None, f"Error in segment {i+1} ({sample_name}): {status}"
+            
+    if all_audio_segments:
+        if silence_duration > 0 and len(all_audio_segments) > 1:
+            combined = np.concatenate(all_audio_segments[:-1])
+        else:
+            combined = np.concatenate(all_audio_segments)
+            
+        combined = process_audio_array(combined)
+        audio_int16 = (combined * 32767).astype(np.int16)
+        play_done_chime()
+        return (final_sr, audio_int16), f"Dialogue generated successfully with {len(segments)} segments!"
+    
+    return None, "No audio generated."
+
+def add_dialogue_row_at(index, count, *args):
+    num = 20
+    samples = list(args[:num])
+    controls = list(args[num:2*num])
+    texts = list(args[2*num:3*num])
+    
+    if count < num:
+        samples.insert(index + 1, samples[index])
+        controls.insert(index + 1, "")
+        texts.insert(index + 1, "")
+        samples.pop()
+        controls.pop()
+        texts.pop()
+        count += 1
+    
+    updates = [count]
+    updates.extend([gr.update(value=samples[i], visible=(i < count)) for i in range(num)])
+    updates.extend([gr.update(value=controls[i], visible=(i < count)) for i in range(num)])
+    updates.extend([gr.update(value=texts[i], visible=(i < count)) for i in range(num)])
+    updates.extend([gr.update(visible=(i < count)) for i in range(num)])
+    return updates
+
+def rem_dialogue_row_at(index, count, *args):
+    num = 20
+    samples = list(args[:num])
+    controls = list(args[num:2*num])
+    texts = list(args[2*num:3*num])
+    
+    if count > 1:
+        samples.pop(index)
+        controls.pop(index)
+        texts.pop(index)
+        samples.append(None)
+        controls.append("")
+        texts.append("")
+        count -= 1
+        
+    updates = [count]
+    updates.extend([gr.update(value=samples[i], visible=(i < count)) for i in range(num)])
+    updates.extend([gr.update(value=controls[i], visible=(i < count)) for i in range(num)])
+    updates.extend([gr.update(value=texts[i], visible=(i < count)) for i in range(num)])
+    updates.extend([gr.update(visible=(i < count)) for i in range(num)])
+    return updates
+
+def clone_dialogue_row_at(index, count, *args):
+    num = 20
+    samples = list(args[:num])
+    controls = list(args[num:2*num])
+    texts = list(args[2*num:3*num])
+    
+    if count < num:
+        samples.insert(index + 1, samples[index])
+        controls.insert(index + 1, controls[index])
+        texts.insert(index + 1, texts[index])
+        samples.pop()
+        controls.pop()
+        texts.pop()
+        count += 1
+        
+    updates = [count]
+    updates.extend([gr.update(value=samples[i], visible=(i < count)) for i in range(num)])
+    updates.extend([gr.update(value=controls[i], visible=(i < count)) for i in range(num)])
+    updates.extend([gr.update(value=texts[i], visible=(i < count)) for i in range(num)])
+    updates.extend([gr.update(visible=(i < count)) for i in range(num)])
+    return updates
+
+
 
 def start_training(
     model_choice,
@@ -1265,84 +1418,149 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
             timer = gr.Timer(1)
             timer.tick(check_training_status, outputs=[logs_out])
 
-        # === Inference Tab ===
-        with gr.Tab("🔊 Inference") as tab_infer:
-            gr.Markdown("### 🎙️ Unified Voice Synthesis")
+        # === Voice Clone Tab ===
+        with gr.Tab("🔊 Voice Clone") as tab_infer:
+            gr.Markdown("### 🎙️ Unified Voice Synthesis & Dialogue Builder")
             gr.Markdown("> **Optimization Note:** Hardware acceleration (torch.compile) is active. The first generation after loading a new model or LoRA rank may take **up to 5 minutes** to optimize. Subsequent runs will be near-instant.")
             
-            with gr.Row():
-                # --- Left Column: Reference & Voice Selection ---
-                with gr.Column(scale=1, elem_classes="form-section"):
-                    gr.Markdown("#### 🎙️ Voice & Reference")
-                    with gr.Row():
-                        infer_sample_select = gr.Dropdown(
-                            choices=sample_choices,
-                            value=default_sample_name,
-                            label="Quick Sample Select",
-                            info="Load a reference from your 'samples' library.",
-                            scale=4
-                        )
-                        refresh_infer_sample_btn = gr.Button("🔄", scale=1, min_width=50)
-                    
-                    infer_ref_audio = gr.Audio(label="Reference Audio", type="filepath", value=default_audio)
-                    infer_ref_text = gr.Textbox(
-                        label="Reference Text (Transcript)", 
-                        placeholder="Automatic transcription if left empty...", 
-                        lines=2,
-                        value=default_text
+            # --- GLOBAL SETTINGS ---
+            with gr.Accordion("⚙️ Global Generation Settings", open=True, elem_classes="accordion"):
+                with gr.Row():
+                    infer_base_model = gr.Dropdown(
+                        label="Core Model", 
+                        choices=list(VOXCPM_MODELS.keys()), 
+                        value="VoxCPM-2.0",
+                        info="Select the base foundation model.",
+                        scale=2
                     )
-                    
-                    gr.Markdown("---")
                     infer_lora = gr.Dropdown(
                         label="Voice Clone (LoRA)",
                         choices=["None"] + [ckpt[0] for ckpt in scan_lora_checkpoints(with_info=True)],
                         value="None",
-                        info="Select 'None' for standard VoxCPM voice."
+                        info="Select 'None' for standard VoxCPM voice.",
+                        scale=2
                     )
-                    refresh_infer_lora_btn = gr.Button("🔄 Refresh Available Voices", variant="secondary", size="sm")
-
-                # --- Right Column: Content & Generation Settings ---
-                with gr.Column(scale=1, elem_classes="form-section"):
-                    gr.Markdown("#### ✍️ Target Speech")
-                    infer_text = gr.Textbox(
-                        label="Target Text", 
-                        placeholder="Enter the text you want the AI to speak...", 
-                        lines=4,
-                        value="Hello! I can speak with any voice you provide as a reference."
-                    )
-                    
-                    infer_control = gr.Textbox(
-                        label="Style / Control (Optional)", 
-                        placeholder="e.g. A happy energetic tone / Whispering softly...", 
-                        lines=2
-                    )
-
+                    refresh_infer_lora_btn = gr.Button("🔄 Refresh Available Voices", variant="secondary", scale=1)
+                
+                with gr.Row():
+                    infer_cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=5.0, value=2.0, step=0.1)
+                    infer_steps = gr.Slider(label="Inference Steps", minimum=1, maximum=50, value=10, step=1)
+                    infer_seed = gr.Number(label="Seed (-1 for Random)", value=-1, precision=0)
+                
+                with gr.Row():
+                    with gr.Column():
+                        split_para_check = gr.Checkbox(label="Split by Paragraphs (Recommended for long texts)", value=False)
+                        gr.Markdown("ℹ️ *To apply splits, you must press **Enter** after each sentence or point where you want a cut; each line break will generate an independent audio clip that will be automatically merged.*")
+                    with gr.Column():
+                        dialogue_silence_slider = gr.Slider(0, 5, value=0.5, step=0.1, label="Silence between speakers (s)")
+                        if HAS_COMPILE_CACHE:
+                            gr.Markdown(f"✅ **Cache Found:** ({_cache_kernel_count} kernels)")
+                        else:
+                            gr.Markdown(f"⚠️ **No Cache:** First PyTorch run ~5 min.")
+            
+            # --- SUB-TABS ---
+            with gr.Tabs():
+                # --- SINGLE INFERENCE ---
+                with gr.Tab("Single Inference"):
                     with gr.Row():
-                        infer_split_by_paragraph = gr.Checkbox(
-                            label="Split by Paragraph (for long texts)", 
-                            value=False, 
-                            info="ℹ️ *To apply splits, you must press **Enter** after each sentence or point where you want a cut; each line break will generate an independent audio clip that will be automatically merged.*",
-                            scale=3
-                        )
-                        infer_clips_count = gr.Markdown(
-                            value="*1 clip detected*",
-                            visible=False,
-                            elem_classes="clips-count-mini"
-                        )
-                    
-                    
-                    with gr.Accordion("⚙️ Advanced Parameters", open=False):
-                        infer_cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=5.0, value=2.0, step=0.1)
-                        infer_steps = gr.Slider(label="Inference Steps", minimum=1, maximum=50, value=10, step=1)
-                        infer_seed = gr.Number(label="Seed (-1 for Random)", value=-1, precision=0)
-                        infer_base_model = gr.Dropdown(
-                            label="Core Model", 
-                            choices=list(VOXCPM_MODELS.keys()), 
-                            value="VoxCPM-2.0",
-                            info="Select the base foundation model."
-                        )
+                        # --- Left Column: Reference & Voice Selection ---
+                        with gr.Column(scale=1, elem_classes="form-section"):
+                            gr.Markdown("#### 🎙️ Voice & Reference")
+                            with gr.Row():
+                                infer_sample_select = gr.Dropdown(
+                                    choices=sample_choices,
+                                    value=default_sample_name,
+                                    label="Quick Sample Select",
+                                    info="Load a reference from your 'samples' library.",
+                                    scale=4
+                                )
+                                refresh_infer_sample_btn = gr.Button("🔄", scale=1, min_width=50)
+                            
+                            infer_ref_audio = gr.Audio(label="Reference Audio", type="filepath", value=default_audio)
+                            infer_ref_text = gr.Textbox(
+                                label="Reference Text (Transcript)", 
+                                placeholder="Automatic transcription if left empty...", 
+                                lines=2,
+                                value=default_text
+                            )
 
-                    infer_gen_btn = gr.Button("⚡ Generate Speech", variant="primary", size="lg", elem_classes="button-primary")
+                        # --- Right Column: Content & Generation Settings ---
+                        with gr.Column(scale=1, elem_classes="form-section"):
+                            gr.Markdown("#### ✍️ Target Speech")
+                            infer_text = gr.Textbox(
+                                label="Target Text", 
+                                placeholder="Enter the text you want the AI to speak...", 
+                                lines=4,
+                                value="Hello! I can speak with any voice you provide as a reference."
+                            )
+                            
+                            infer_control = gr.Textbox(
+                                label="Style / Control (Optional)", 
+                                placeholder="e.g. A happy energetic tone / Whispering softly...", 
+                                lines=2
+                            )
+                            
+                            infer_clips_count = gr.Markdown(
+                                value="*1 clip detected*",
+                                visible=False,
+                                elem_classes="clips-count-mini"
+                            )
+
+                            infer_gen_btn = gr.Button("⚡ Generate Speech", variant="primary", size="lg", elem_classes="button-primary")
+
+                # --- DIALOGUE BUILDER ---
+                with gr.Tab("Dialogue Builder"):
+                    gr.Markdown("#### 💬 Multi-Speaker Dialogue")
+                    gr.Markdown("Select different speakers for each turn. Use the buttons on the right to manage segments.")
+                    
+                    dialogue_row_count = gr.State(2)
+                    MAX_DIALOGUE_SEGMENTS = 20
+                    dialogue_samples = []
+                    dialogue_controls = []
+                    dialogue_texts = []
+                    dialogue_rows = []
+                    dialogue_add_btns = []
+                    dialogue_rem_btns = []
+                    dialogue_clone_btns = []
+                    
+                    for i in range(MAX_DIALOGUE_SEGMENTS):
+                        with gr.Row(visible=(i < 2)) as row:
+                            with gr.Column(scale=3):
+                                s = gr.Dropdown(choices=sample_choices, label=f"Speaker {i+1}", value=default_sample_name if i < 2 else None)
+                                c = gr.Textbox(placeholder=f"Style {i+1}...", label=f"Control {i+1}", lines=1)
+                            t = gr.Textbox(placeholder=f"Enter text for speaker {i+1}...", label=f"Text {i+1}", scale=7, lines=5)
+                            with gr.Row(scale=1):
+                                add_btn = gr.Button("➕", variant="secondary", size="sm", elem_classes=["green-btn"])
+                                clone_btn = gr.Button("📋", variant="secondary", size="sm")
+                                rem_btn = gr.Button("🗑️", variant="stop", size="sm", elem_classes=["red-btn"])
+                            
+                        dialogue_rows.append(row)
+                        dialogue_samples.append(s)
+                        dialogue_controls.append(c)
+                        dialogue_texts.append(t)
+                        dialogue_add_btns.append(add_btn)
+                        dialogue_rem_btns.append(rem_btn)
+                        dialogue_clone_btns.append(clone_btn)
+
+                    # Bind events after all components are created
+                    for i in range(MAX_DIALOGUE_SEGMENTS):
+                        dialogue_add_btns[i].click(
+                            fn=add_dialogue_row_at,
+                            inputs=[gr.State(i), dialogue_row_count] + dialogue_samples + dialogue_controls + dialogue_texts,
+                            outputs=[dialogue_row_count] + dialogue_samples + dialogue_controls + dialogue_texts + dialogue_rows
+                        )
+                        dialogue_rem_btns[i].click(
+                            fn=rem_dialogue_row_at,
+                            inputs=[gr.State(i), dialogue_row_count] + dialogue_samples + dialogue_controls + dialogue_texts,
+                            outputs=[dialogue_row_count] + dialogue_samples + dialogue_controls + dialogue_texts + dialogue_rows
+                        )
+                        dialogue_clone_btns[i].click(
+                            fn=clone_dialogue_row_at,
+                            inputs=[gr.State(i), dialogue_row_count] + dialogue_samples + dialogue_controls + dialogue_texts,
+                            outputs=[dialogue_row_count] + dialogue_samples + dialogue_controls + dialogue_texts + dialogue_rows
+                        )
+                        
+                    dialogue_gen_btn = gr.Button("⚡ Generate Dialogue", variant="primary", size="lg", elem_classes="button-primary")
 
             with gr.Row():
                 infer_audio_out = gr.Audio(label="Generated Audio")
@@ -1369,8 +1587,8 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                 label = f"**{count} clips detected**" if count > 1 else "*1 clip detected*"
                 return gr.update(visible=True, value=label)
 
-            infer_text.change(update_clips_count, inputs=[infer_text, infer_split_by_paragraph], outputs=[infer_clips_count])
-            infer_split_by_paragraph.change(update_clips_count, inputs=[infer_text, infer_split_by_paragraph], outputs=[infer_clips_count])
+            infer_text.change(update_clips_count, inputs=[infer_text, split_para_check], outputs=[infer_clips_count])
+            split_para_check.change(update_clips_count, inputs=[infer_text, split_para_check], outputs=[infer_clips_count])
             
             # Sync model download
             infer_base_model.change(fn=download_voxcpm_model, inputs=[infer_base_model], outputs=[])
@@ -1387,9 +1605,24 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                     infer_seed,
                     infer_base_model,
                     infer_control,
-                    infer_split_by_paragraph
+                    split_para_check
                 ],
                 outputs=[infer_audio_out, infer_status_out],
+            )
+
+            dialogue_gen_btn.click(
+                generate_dialogue,
+                inputs=[
+                    infer_lora,
+                    infer_cfg,
+                    infer_steps,
+                    infer_seed,
+                    infer_base_model,
+                    split_para_check,
+                    dialogue_row_count,
+                    dialogue_silence_slider
+                ] + dialogue_samples + dialogue_controls + dialogue_texts,
+                outputs=[infer_audio_out, infer_status_out]
             )
             
 
@@ -1454,11 +1687,17 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                 fn=lambda: gr.update(choices=get_sample_choices()), outputs=[sample_dropdown]
             )
 
+CUSTOM_CSS = """
+.green-btn { background-color: #2e8b57 !important; color: white !important; }
+.red-btn { background-color: #8b0000 !important; color: white !important; }
+"""
+
 if __name__ == "__main__":
     # Ensure lora directory exists
     os.makedirs("lora", exist_ok=True)
     app.queue().launch(
         server_name="127.0.0.1", 
         server_port=7860,
-        inbrowser=True
+        inbrowser=True,
+        css=CUSTOM_CSS
     )
