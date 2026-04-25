@@ -271,14 +271,14 @@ class VoxCPM2Model(nn.Module):
                 import triton  # noqa: F401
             except ImportError:
                 raise ValueError("triton is not installed")
-            self.base_lm.forward_step = torch.compile(self.base_lm.forward_step, mode="reduce-overhead", fullgraph=True)
+            self.base_lm.forward_step = torch.compile(self.base_lm.forward_step, fullgraph=True, options={"cudagraphs": False})
             self.residual_lm.forward_step = torch.compile(
-                self.residual_lm.forward_step, mode="reduce-overhead", fullgraph=True
+                self.residual_lm.forward_step, fullgraph=True, options={"cudagraphs": False}
             )
             self._feat_encoder_raw = self.feat_encoder
-            self.feat_encoder = torch.compile(self.feat_encoder, mode="reduce-overhead", fullgraph=True)
+            self.feat_encoder = torch.compile(self.feat_encoder, fullgraph=True, options={"cudagraphs": False})
             self.feat_decoder.estimator = torch.compile(
-                self.feat_decoder.estimator, mode="reduce-overhead", fullgraph=True
+                self.feat_decoder.estimator, fullgraph=True, options={"cudagraphs": False}
             )
         except Exception as e:
             print(f"Warning: torch.compile disabled - {e}", file=sys.stderr)

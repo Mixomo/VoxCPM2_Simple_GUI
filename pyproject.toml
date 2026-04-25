@@ -51,7 +51,9 @@ dependencies = [
     "safetensors",
     "triton",
     "faster-whisper",
+    "onnxruntime<1.24.0; python_version < '3.11'",
     "tensorboardx",
+    "tensorboard",
     "ninja"
 ]
 
