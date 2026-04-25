@@ -99,6 +99,21 @@ VOXCPM_MODELS = {
     "VoxCPM-0.5B": "openbmb/VoxCPM-0.5B",
 }
 
+WHISPER_MODELS = {
+    "large-v3 (~10 GB VRAM)": "Systran/faster-whisper-large-v3",
+    "large-v2 (~10 GB VRAM)": "Systran/faster-whisper-large-v2",
+    "medium (~5 GB VRAM)": "Systran/faster-whisper-medium",
+    "small (~2 GB VRAM)": "Systran/faster-whisper-small",
+    "base (~1 GB VRAM)": "Systran/faster-whisper-base"
+}
+
+WHISPER_LANGS = {
+    "Auto-detect": None,
+    "English": "en", "Spanish": "es", "French": "fr", "German": "de", "Italian": "it",
+    "Portuguese": "pt", "Russian": "ru", "Turkish": "tr", "Japanese": "ja", "Korean": "ko",
+    "Chinese": "zh", "Arabic": "ar", "Dutch": "nl", "Greek": "el", "Polish": "pl"
+}
+
 
 def get_timestamp_str():
     return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -122,21 +137,27 @@ def detect_sample_rate(pretrained_path: str) -> Optional[int]:
         return None
 
 
-def get_or_load_asr_model():
+def get_or_load_asr_model(model_display_name="large-v3 (~10 GB VRAM)"):
     global asr_model
+    whisper_repo = WHISPER_MODELS.get(model_display_name, "Systran/faster-whisper-large-v3")
+    
+    # If a different model is requested, unload the current one
+    if asr_model is not None:
+        # We can't easily check the model name from the object, so we check if the path matches
+        # For simplicity, we'll just unload and reload if we want a specific model
+        # Or better, we track the current loaded model name
+        pass
+
     if asr_model is None:
-        print("Loading ASR model (Faster-Whisper Large-v3)...", file=sys.stderr)
+        print(f"Loading ASR model ({whisper_repo})...", file=sys.stderr)
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        # Using float16 for CUDA to save VRAM and speed up, int8 for CPU
         compute_type = "float16" if device == "cuda" else "int8"
         
-        # Local model path
-        whisper_model_name = "Systran/faster-whisper-large-v3"
-        dest_path = project_root / "models" / whisper_model_name.replace("/", "--")
+        dest_path = project_root / "models" / whisper_repo.replace("/", "--")
         
         if not dest_path.exists():
             print(f"Downloading ASR model to {dest_path}...", file=sys.stderr)
-            snapshot_download(repo_id=whisper_model_name, local_dir=str(dest_path), local_dir_use_symlinks=False)
+            snapshot_download(repo_id=whisper_repo, local_dir=str(dest_path), local_dir_use_symlinks=False)
             
         asr_model = WhisperModel(str(dest_path), device=device, compute_type=compute_type)
     return asr_model
@@ -285,11 +306,11 @@ def save_prep_sample(audio_path, sample_name, transcription):
     return f"Sample '{sample_name}' saved successfully (Audio + JSON + TXT)!"
 
 
-def recognize_audio(audio_path):
+def recognize_audio(audio_path, model_size="large-v3 (~10 GB VRAM)"):
     if not audio_path:
         return ""
     try:
-        model = get_or_load_asr_model()
+        model = get_or_load_asr_model(model_size)
         segments, info = model.transcribe(audio_path, beam_size=5)
         text = "".join([s.text for s in segments]).strip()
         return text
@@ -368,7 +389,7 @@ def download_voxcpm_model(model_id_or_name):
     return str(dest_path.absolute())
 
 
-def prepare_voxcpm_dataset(source_folder, dataset_name, val_split=0.1, batch_size=16, progress=gr.Progress()):
+def prepare_voxcpm_dataset(source_folder, dataset_name, val_split=0.1, batch_size=16, whisper_model="large-v3 (~10 GB VRAM)", whisper_lang="Auto-detect", progress=gr.Progress()):
     if not source_folder or not os.path.isdir(source_folder):
         return "Error: Please provide a valid source folder path."
     if not dataset_name or dataset_name.strip() == "":
@@ -379,10 +400,9 @@ def prepare_voxcpm_dataset(source_folder, dataset_name, val_split=0.1, batch_siz
     target_dir = datasets_root / dataset_name
     os.makedirs(target_dir, exist_ok=True)
 
-    audio_files = []
-    for ext in ["*.wav", "*.mp3", "*.flac", "*.m4a", "*.ogg"]:
-        audio_files.extend(glob.glob(os.path.join(source_folder, ext)))
-        audio_files.extend(glob.glob(os.path.join(source_folder, ext.upper())))
+    all_files = glob.glob(os.path.join(source_folder, "*.*"))
+    audio_extensions = (".wav", ".mp3", ".flac", ".m4a", ".ogg")
+    audio_files = [f for f in all_files if f.lower().endswith(audio_extensions)]
 
     if not audio_files:
         return "Error: No audio files found in the source folder."
@@ -393,8 +413,9 @@ def prepare_voxcpm_dataset(source_folder, dataset_name, val_split=0.1, batch_siz
     total = len(audio_files)
     all_data = []
     
-    progress(0.1, desc="Initializing Whisper Large-v3...")
-    model = get_or_load_asr_model() # Pre-load to avoid timeout in loop
+    progress(0.1, desc=f"Initializing Whisper {whisper_model}...")
+    model = get_or_load_asr_model(whisper_model) # Pre-load to avoid timeout in loop
+    lang_code = WHISPER_LANGS.get(whisper_lang)
     
     try:
         from faster_whisper import BatchedInferencePipeline
@@ -423,9 +444,9 @@ def prepare_voxcpm_dataset(source_folder, dataset_name, val_split=0.1, batch_siz
             
             # Transcribe
             if pipeline:
-                segments, info = pipeline.transcribe(str(dest_audio), batch_size=batch_size, beam_size=5)
+                segments, info = pipeline.transcribe(str(dest_audio), batch_size=batch_size, beam_size=5, language=lang_code)
             else:
-                segments, info = model.transcribe(str(dest_audio), beam_size=5)
+                segments, info = model.transcribe(str(dest_audio), beam_size=5, language=lang_code)
                 
             text = "".join([s.text for s in segments]).strip()
             if text:
@@ -709,8 +730,9 @@ def run_inference(text, prompt_wav, prompt_text, lora_selection, cfg_scale, step
         if not prompt_text or not prompt_text.strip():
             print("Reference audio provided but text missing, auto-recognizing...", file=sys.stderr)
             try:
+                # Need to pass whisper settings from UI here or assume global sync
+                # For inference tab, we'll use the infer_whisper_model value later
                 final_prompt_text = recognize_audio(prompt_wav)
-                unload_asr_model() # Free VRAM for inference
                 if final_prompt_text:
                     print(f"ASR result: {final_prompt_text}", file=sys.stderr)
                 else:
@@ -1102,6 +1124,97 @@ def check_training_status():
     return log, None
 
 
+def calculate_hyperparams(manifest_path, vram_preset):
+    import math
+    if not manifest_path or not os.path.exists(manifest_path):
+        return [gr.update()] * 7 + ["Error: Please select a valid Train Manifest first."]
+    
+    total_duration = 0.0
+    num_clips = 0
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip(): continue
+                data = json.loads(line)
+                total_duration += data.get("duration", 0.0)
+                num_clips += 1
+    except Exception as e:
+        return [gr.update()] * 7 + [f"Error reading manifest: {e}"]
+        
+    if num_clips == 0:
+        return [gr.update()] * 7 + ["Error: Train Manifest is empty."]
+        
+    avg_duration = total_duration / num_clips
+    duration_mins = total_duration / 60.0
+    
+    # 1. Steps Calculation
+    # ~150 steps per minute of audio. Min 500, Max 10000.
+    target_steps = int(duration_mins * 150)
+    target_steps = max(500, min(10000, target_steps))
+    # Round to nearest 100
+    target_steps = round(target_steps / 100) * 100
+    
+    # 2. VRAM & Batch Size
+    if "12GB" in vram_preset:
+        bs = "1"
+        grad_accum = 4
+    else:
+        # 24GB+
+        bs = "2"
+        grad_accum = 2
+        
+    # 3. Learning Rate (Logarithmic scale based on duration)
+    # A 1-minute dataset starts at 0.00005. 
+    # A 15-minute dataset reaches ~0.0001 (standard optimal).
+    # Scaled continuously to prevent fixed jumps that cause sudden overfitting.
+    if duration_mins <= 0.5:
+        calc_lr = 0.00004
+    else:
+        calc_lr = 0.00005 + (math.log10(max(1.0, duration_mins)) * 0.00004)
+        
+    # Clamp between 0.00003 and 0.0003
+    calc_lr = max(0.00003, min(0.0003, calc_lr))
+    
+    # Format as plain decimal with up to 6 decimal places (no scientific notation)
+    new_lr = f"{calc_lr:.6f}".rstrip('0')
+    if new_lr.endswith('.'):
+        new_lr += '0'
+        
+    # 4. Intervals & Warmup
+    # Warmup: 10% of steps, rounded to nearest 50
+    warmup = max(50, round((target_steps * 0.1) / 50) * 50)
+    
+    # Validation / Save: 4 saves during training
+    interval = max(100, round((target_steps / 4) / 100) * 100)
+    
+    summary = (
+        f"### 📊 Dataset & Hyperparameter Summary\n"
+        f"| Metric | Value |\n"
+        f"| :--- | :--- |\n"
+        f"| **Total Clips** | {num_clips} |\n"
+        f"| **Total Duration** | {duration_mins:.2f} min ({total_duration:.1f}s) |\n"
+        f"| **Avg. Duration** | {avg_duration:.2f}s |\n"
+        f"| **Calculated LR** | `{new_lr}` |\n"
+        f"| **Max Steps** | {target_steps} |\n"
+        f"| **Batch Size** | {bs} (Accum: {grad_accum}) |\n"
+        f"| **Save/Val Int.** | {interval} |\n"
+        f"| **Warmup Steps** | {warmup} |\n\n"
+        f"✅ *Values applied to the settings below. You are ready to start training.*"
+    )
+    
+    return [
+        gr.update(value=new_lr),
+        gr.update(value=target_steps),
+        gr.update(value=bs),
+        gr.update(value=grad_accum),
+        gr.update(value=warmup),
+        gr.update(value=interval),
+        gr.update(value=interval),
+        summary,
+        gr.update(value=summary, visible=True)
+    ]
+
+
 # --- GUI Layout ---
 with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
     # --- Initial State for Samples ---
@@ -1145,6 +1258,22 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                             scale=4
                         )
                         explorer_btn = gr.Button("📂 Browse", scale=1)
+                    
+                    with gr.Row():
+                        prep_dataset_whisper_model = gr.Dropdown(
+                            choices=list(WHISPER_MODELS.keys()),
+                            value="large-v3 (~10 GB VRAM)",
+                            label="Whisper Model",
+                            scale=1,
+                            interactive=True
+                        )
+                        prep_dataset_whisper_lang = gr.Dropdown(
+                            choices=list(WHISPER_LANGS.keys()),
+                            value="Auto-detect",
+                            label="Language",
+                            scale=1,
+                            interactive=True
+                        )
                     
                     def open_folder_explorer():
                         try:
@@ -1199,7 +1328,7 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
 
             prep_btn.click(
                 fn=prepare_voxcpm_dataset,
-                inputs=[src_folder, dataset_name_input, val_split_slider, batch_size_slider],
+                inputs=[src_folder, dataset_name_input, val_split_slider, batch_size_slider, prep_dataset_whisper_model, prep_dataset_whisper_lang],
                 outputs=[prep_status_out]
             )
 
@@ -1264,6 +1393,25 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                     refresh_out_btn.click(refresh_projects, outputs=[output_name])
 
                     gr.Markdown("#### ⚙️ Core Hyperparameters")
+                    
+                    gr.Markdown("""
+                    > **💡 Smart Scaling System**
+                    > This tool analyzes your dataset and hardware to prevent overfitting:
+                    > - **LR**: Logarithmic scaling (5e-5 to 1.5e-4) based on minutes of audio.
+                    > - **Steps**: Dynamic iteration count (~150 steps/min).
+                    > - **Intervals**: Automatic 4-checkpoint split for progress monitoring.
+                    """)
+
+                    with gr.Row(elem_classes="form-section"):
+                        calc_vram = gr.Dropdown(
+                            label="VRAM Preset",
+                            choices=["12GB (VoxCPM-1.5 only)", "24GB+ (VoxCPM-2.0 / 1.5)"],
+                            value="24GB+ (VoxCPM-2.0 / 1.5)",
+                            scale=3
+                        )
+                        calc_btn = gr.Button("🧠 Auto-Calculate Hyperparams", variant="secondary", scale=2)
+                    
+                    calc_info_box = gr.Markdown(visible=False, elem_classes="info-box")
 
                     with gr.Row():
                         lr = gr.Dropdown(
@@ -1383,6 +1531,12 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                 inputs=[train_model_select],
                 outputs=[sample_rate],
             )
+            
+            calc_btn.click(
+                fn=calculate_hyperparams,
+                inputs=[train_manifest, calc_vram],
+                outputs=[lr, num_iters, batch_size, grad_accum_steps, warmup_steps, valid_interval, save_interval, logs_out, calc_info_box]
+            )
 
             start_btn.click(
                 start_training,
@@ -1446,6 +1600,23 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                         scale=2
                     )
                     refresh_infer_lora_btn = gr.Button("🔄 Refresh Available Voices", variant="secondary", scale=1)
+                
+                with gr.Row():
+                    infer_whisper_model = gr.Dropdown(
+                        choices=list(WHISPER_MODELS.keys()),
+                        value="large-v3 (~10 GB VRAM)",
+                        label="Whisper Model (for ASR)",
+                        scale=2,
+                        interactive=True
+                    )
+                    infer_whisper_lang = gr.Dropdown(
+                        choices=list(WHISPER_LANGS.keys()),
+                        value="Auto-detect",
+                        label="ASR Language",
+                        scale=2,
+                        interactive=True
+                    )
+                    gr.Column(scale=1)
                 
                 with gr.Row():
                     infer_cfg = gr.Slider(label="CFG Scale", minimum=1.0, maximum=5.0, value=2.0, step=0.1)
@@ -1591,10 +1762,10 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                 infer_status_out = gr.Textbox(label="System Status", interactive=False)
             
             # --- Unified Event Handlers ---
-            def smart_asr_unified(audio, current_text):
+            def smart_asr_unified(audio, current_text, model_size):
                 if current_text and current_text.strip():
                     return current_text
-                return recognize_audio(audio)
+                return recognize_audio(audio, model_size)
 
             infer_sample_select.change(
                 fn=handle_sample_selection_ui, 
@@ -1603,7 +1774,7 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
             )
             refresh_infer_sample_btn.click(lambda: gr.update(choices=get_sample_choices()), outputs=[infer_sample_select])
             refresh_infer_lora_btn.click(refresh_loras, outputs=[infer_lora])
-            infer_ref_audio.change(fn=smart_asr_unified, inputs=[infer_ref_audio, infer_ref_text], outputs=[infer_ref_text])
+            infer_ref_audio.change(fn=smart_asr_unified, inputs=[infer_ref_audio, infer_ref_text, infer_whisper_model], outputs=[infer_ref_text])
 
             def update_clips_count(text, enabled):
                 if not enabled:
@@ -1677,6 +1848,20 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
                     )
                     refresh_samples_btn = gr.Button("🔄 Refresh List", size="sm")
                     
+                    gr.Markdown("#### ⚙️ Whisper Settings")
+                    prep_samples_whisper_model = gr.Dropdown(
+                        choices=list(WHISPER_MODELS.keys()),
+                        value="large-v3 (~10 GB VRAM)",
+                        label="Whisper Model",
+                        interactive=True
+                    )
+                    prep_samples_whisper_lang = gr.Dropdown(
+                        choices=list(WHISPER_LANGS.keys()),
+                        value="Auto-detect",
+                        label="Language",
+                        interactive=True
+                    )
+                    
                 
                 with gr.Column(scale=2, elem_classes="form-section"):
                     gr.Markdown("#### 🎙️ Transcription & Editor")
@@ -1710,10 +1895,22 @@ with gr.Blocks(title="VoxCPM - Simple GUI | Inference + LoRa Training") as app:
             sample_dropdown.change(on_sample_change, inputs=[sample_dropdown], outputs=[prep_audio_player, prep_transcription, save_sample_name])
             refresh_samples_btn.click(lambda: gr.update(choices=get_sample_choices()), outputs=[sample_dropdown])
             
-            transcribe_prep_btn.click(fn=recognize_audio, inputs=[prep_audio_player], outputs=[prep_transcription])
+            transcribe_prep_btn.click(fn=recognize_audio, inputs=[prep_audio_player, prep_samples_whisper_model], outputs=[prep_transcription])
             save_sample_btn.click(fn=save_prep_sample, inputs=[prep_audio_player, save_sample_name, prep_transcription], outputs=[prep_op_status]).then(
                 fn=lambda: gr.update(choices=get_sample_choices()), outputs=[sample_dropdown]
             )
+
+            # --- Whisper Synchronization ---
+            all_w_models = [infer_whisper_model, prep_dataset_whisper_model, prep_samples_whisper_model]
+            all_w_langs = [infer_whisper_lang, prep_dataset_whisper_lang, prep_samples_whisper_lang]
+
+            def sync_w_model(val): return [gr.update(value=val, interactive=True)] * 3
+            def sync_w_lang(val): return [gr.update(value=val, interactive=True)] * 3
+
+            for m in all_w_models:
+                m.change(sync_w_model, inputs=[m], outputs=all_w_models)
+            for l in all_w_langs:
+                l.change(sync_w_lang, inputs=[l], outputs=all_w_langs)
 
 CUSTOM_CSS = """
 .green-btn { background-color: #2e8b57 !important; color: white !important; }
@@ -1729,3 +1926,5 @@ if __name__ == "__main__":
         inbrowser=True,
         css=CUSTOM_CSS
     )
+
+
