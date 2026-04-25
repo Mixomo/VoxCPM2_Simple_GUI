@@ -51,7 +51,8 @@ dependencies = [
     "safetensors",
     "triton-windows",
     "faster-whisper",
-    "tensorboardx"
+    "tensorboardx",
+    "tensorboard"
 ]
 
 [project.optional-dependencies]
