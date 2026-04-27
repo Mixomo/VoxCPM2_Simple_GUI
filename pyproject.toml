@@ -110,6 +110,7 @@ include = ["voxcpm*"]
 
 [tool.setuptools_scm]
 version_scheme = "post-release"
+fallback_version = "0.1.0"
 
 [tool.uv]
 managed = true
